@@ -10,26 +10,67 @@ import re
 
 from jira_client import JiraClient
 from export_csv import export_csv
-from export_json import export_json
+from export_json import export_json, export_markdown
 
 APP_DIR = os.path.join(os.path.expanduser("~"), ".jira_metrics")
 CREDS_PATH = os.path.join(APP_DIR, "credentials.json")
 CONFIG_DIR = os.path.join(APP_DIR, "configs")
+CONNECTIONS_PATH = os.path.join(APP_DIR, "connections.json")
 
 def ensure_app_dirs():
     os.makedirs(APP_DIR, exist_ok=True)
     os.makedirs(CONFIG_DIR, exist_ok=True)
 
 def load_credentials():
+    """Load the last used credentials (for backward compatibility)"""
     if os.path.exists(CREDS_PATH):
         with open(CREDS_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
     return None
 
 def save_credentials(base_url, email, api_token):
+    """Save credentials as the default (for backward compatibility)"""
     ensure_app_dirs()
     with open(CREDS_PATH, "w", encoding="utf-8") as f:
         json.dump({"base_url": base_url, "email": email, "api_token": api_token}, f)
+
+def load_saved_connections():
+    """Load all saved connections"""
+    if os.path.exists(CONNECTIONS_PATH):
+        try:
+            with open(CONNECTIONS_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_connection(base_url, email, api_token, name=None):
+    """Save a connection with a friendly name"""
+    ensure_app_dirs()
+    connections = load_saved_connections()
+    
+    # Generate a name if not provided
+    if not name:
+        name = base_url.replace('https://', '').replace('http://', '').split('.')[0]
+    
+    # Ensure unique name
+    original_name = name
+    counter = 1
+    while name in connections:
+        name = f"{original_name} ({counter})"
+        counter += 1
+    
+    connections[name] = {
+        "base_url": base_url,
+        "email": email,
+        "api_token": api_token,
+        "last_used": datetime.now().isoformat()
+    }
+    
+    with open(CONNECTIONS_PATH, "w", encoding="utf-8") as f:
+        json.dump(connections, f, indent=2)
+    
+    return name
 
 def list_configs():
     ensure_app_dirs()
@@ -88,9 +129,23 @@ def business_hours_overlap(start_dt, end_dt, bh):
 class LogConsole(tk.Text):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
-        self.configure(state="disabled", wrap="word")
-        self.tag_config("err", foreground="red")
-        self.tag_config("info", foreground="black")
+        # Modern styling for the log console
+        self.configure(
+            state="disabled", 
+            wrap="word",
+            bg='#ffffff',           # White background
+            fg='#333333',           # Dark gray text
+            insertbackground='#333333',  # Cursor color
+            selectbackground='#0078d4',  # Selection background
+            selectforeground='white',    # Selection text color
+            borderwidth=1,
+            relief='solid',
+            font=('Consolas', 9)    # Monospace font for better readability
+        )
+        self.tag_config("err", foreground="#d13438")    # Red for errors
+        self.tag_config("info", foreground="#333333")   # Dark gray for info
+        self.tag_config("success", foreground="#107c10") # Green for success
+    
     def write(self, msg, level="info"):
         self.configure(state="normal")
         self.insert("end", msg + "\n", level)
@@ -98,40 +153,145 @@ class LogConsole(tk.Text):
         self.configure(state="disabled")
 
 class LoginWindow(tk.Toplevel):
-    def __init__(self, master, on_success, log_fn):
+    def __init__(self, master, on_success, log_fn, switching_instance=False):
         super().__init__(master)
         self.title("Jira Metrics - Login")
         self.resizable(False, False)
         self.on_success = on_success
         self.log = log_fn
+        self.switching_instance = switching_instance
+        
+        # Apply modern styling to login window
+        self.configure(bg='#f0f0f0')
 
-        frm = ttk.Frame(self, padding=10)
+        frm = ttk.Frame(self, padding=20)
         frm.grid(row=0, column=0, sticky="nsew")
 
-        ttk.Label(frm, text="Jira URL:").grid(row=0, column=0, sticky="w")
+        # Add a title label that changes based on context
+        title_text = "Switch Jira Instance" if switching_instance else "Connect to Jira"
+        title_label = ttk.Label(frm, text=title_text, font=('Segoe UI', 14, 'bold'))
+        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
+
+        ttk.Label(frm, text="Jira URL:", font=('Segoe UI', 10)).grid(row=1, column=0, sticky="w", pady=(0, 8))
         self.url_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.url_var, width=40).grid(row=0, column=1, columnspan=2, sticky="we")
+        url_entry = ttk.Entry(frm, textvariable=self.url_var, width=40, font=('Segoe UI', 10))
+        url_entry.grid(row=1, column=1, columnspan=2, sticky="we", pady=(0, 8))
 
-        ttk.Label(frm, text="Email:").grid(row=1, column=0, sticky="w")
+        ttk.Label(frm, text="Email:", font=('Segoe UI', 10)).grid(row=2, column=0, sticky="w", pady=(0, 8))
         self.email_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.email_var, width=40).grid(row=1, column=1, columnspan=2, sticky="we")
+        email_entry = ttk.Entry(frm, textvariable=self.email_var, width=40, font=('Segoe UI', 10))
+        email_entry.grid(row=2, column=1, columnspan=2, sticky="we", pady=(0, 8))
 
-        ttk.Label(frm, text="API Token:").grid(row=2, column=0, sticky="w")
+        ttk.Label(frm, text="API Token:", font=('Segoe UI', 10)).grid(row=3, column=0, sticky="w", pady=(0, 8))
         self.token_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.token_var, width=40, show="*").grid(row=2, column=1, columnspan=2, sticky="we")
+        token_entry = ttk.Entry(frm, textvariable=self.token_var, width=40, show="*", font=('Segoe UI', 10))
+        token_entry.grid(row=3, column=1, columnspan=2, sticky="we", pady=(0, 8))
 
-        self.btn_login = ttk.Button(frm, text="Login", command=self.do_login)
-        self.btn_login.grid(row=3, column=1, sticky="we", pady=(8, 0))
-        self.btn_use_saved = ttk.Button(frm, text="Use Saved Credentials", command=self.use_saved)
-        self.btn_use_saved.grid(row=3, column=2, sticky="we", pady=(8, 0))
+        # Save credentials checkbox
+        self.save_creds_var = tk.BooleanVar(value=True)
+        save_check = ttk.Checkbutton(frm, text="Save credentials for future use", variable=self.save_creds_var)
+        save_check.grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
+        # Button frame for better layout
+        btn_frame = ttk.Frame(frm)
+        btn_frame.grid(row=5, column=0, columnspan=3, pady=(20, 0))
+        
+        self.btn_login = ttk.Button(btn_frame, text="Connect", command=self.do_login)
+        self.btn_login.pack(side="left", padx=(0, 10))
+        
+        # Only show "Use Saved Credentials" if we have saved credentials and not switching
         creds = load_credentials()
-        if creds:
+        saved_connections = load_saved_connections()
+        
+        if (creds or saved_connections) and not switching_instance:
+            # Saved connections dropdown
+            if saved_connections:
+                ttk.Label(btn_frame, text="Saved Connections:", font=('Segoe UI', 10)).pack(side="left", padx=(0, 5))
+                connection_names = list(saved_connections.keys())
+                self.connection_var = tk.StringVar()
+                connection_combo = ttk.Combobox(btn_frame, textvariable=self.connection_var, 
+                                              values=connection_names, state="readonly", width=20)
+                connection_combo.pack(side="left", padx=(0, 10))
+                connection_combo.bind('<<ComboboxSelected>>', self.on_connection_selected)
+                
+                self.btn_use_saved = ttk.Button(btn_frame, text="Use Selected", command=self.use_selected_connection)
+                self.btn_use_saved.pack(side="left", padx=(0, 10))
+            elif creds:
+                self.btn_use_saved = ttk.Button(btn_frame, text="Use Saved Credentials", command=self.use_saved)
+                self.btn_use_saved.pack(side="left", padx=(0, 10))
+        
+        # Cancel button for when switching instances
+        if switching_instance:
+            self.btn_cancel = ttk.Button(btn_frame, text="Cancel", command=self.destroy)
+            self.btn_cancel.pack(side="left")
+
+        # Pre-fill form with saved credentials if available and not switching
+        if creds and not switching_instance:
             self.url_var.set(creds.get("base_url", ""))
             self.email_var.set(creds.get("email", ""))
 
+        # Center the window on screen
+        self.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        x = (self.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.winfo_screenheight() // 2) - (height // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+        
+        # Focus on the first empty field
+        if not self.url_var.get():
+            url_entry.focus()
+        elif not self.email_var.get():
+            email_entry.focus()
+        else:
+            token_entry.focus()
+
+    def on_connection_selected(self, event=None):
+        """Handle selection of a saved connection"""
+        selected = self.connection_var.get()
+        if selected:
+            saved_connections = load_saved_connections()
+            conn = saved_connections.get(selected)
+            if conn:
+                self.url_var.set(conn.get("base_url", ""))
+                self.email_var.set(conn.get("email", ""))
+                # Don't pre-fill the token for security reasons
+
+    def use_selected_connection(self):
+        """Use the selected saved connection"""
+        selected = self.connection_var.get()
+        if not selected:
+            messagebox.showerror("Error", "Please select a connection.")
+            return
+            
+        saved_connections = load_saved_connections()
+        conn = saved_connections.get(selected)
+        if not conn:
+            messagebox.showerror("Error", "Selected connection not found.")
+            return
+            
+        client = JiraClient(conn["base_url"], conn["email"], conn["api_token"], log_fn=self.log)
+        self.log(f"Testing saved connection '{selected}'...")
+        
+        def test_connection():
+            return client.test_connection()
+            
+        def on_done(ok):
+            if ok:
+                self.log(f"Login success with saved connection '{selected}'.", "success")
+                # Update last used time
+                conn["last_used"] = datetime.now().isoformat()
+                with open(CONNECTIONS_PATH, "w", encoding="utf-8") as f:
+                    json.dump(saved_connections, f, indent=2)
+                self.on_success(client)
+                self.destroy()
+            else:
+                messagebox.showerror("Login Failed", f"Saved connection '{selected}' is invalid.")
+                
+        threading.Thread(target=lambda: self._run_worker(test_connection, on_done), daemon=True).start()
 
     def use_saved(self):
         creds = load_credentials()
@@ -141,7 +301,7 @@ class LoginWindow(tk.Toplevel):
         client = JiraClient(creds["base_url"], creds["email"], creds["api_token"], log_fn=self.log)
         self.log("Testing saved credentials...")
         if client.test_connection():
-            self.log("Login success with saved credentials.")
+            self.log("Login success with saved credentials.", "success")
             self.on_success(client)
             self.destroy()
         else:
@@ -162,12 +322,19 @@ class LoginWindow(tk.Toplevel):
         def on_done(ok):
             self.btn_login.configure(state="normal")
             if ok:
-                self.log("Login success.")
-                save_credentials(base_url, email, token)
+                self.log("Connection successful.", "success")
+                # Save credentials if the checkbox is checked
+                if self.save_creds_var.get():
+                    # Save to both old format (for compatibility) and new format
+                    save_credentials(base_url, email, token)
+                    connection_name = save_connection(base_url, email, token)
+                    self.log(f"Connection saved as '{connection_name}' for future use.")
+                else:
+                    self.log("Credentials not saved (as requested).")
                 self.on_success(client)
                 self.destroy()
             else:
-                messagebox.showerror("Login Failed", "Invalid credentials or URL.")
+                messagebox.showerror("Connection Failed", "Invalid credentials or URL.")
         threading.Thread(target=lambda: self._run_worker(worker, on_done), daemon=True).start()
 
     def _run_worker(self, worker, on_done):
@@ -201,13 +368,22 @@ class ConfigTab(ttk.Frame):
         self._build_ui()
 
     def _build_ui(self):
-        left = ttk.LabelFrame(self, text="Fields", padding=8)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0,8), pady=8)
+        # Create main container with padding
+        main_container = ttk.Frame(self, padding=10)
+        main_container.grid(row=0, column=0, sticky="nsew")
+        
+        left = ttk.LabelFrame(main_container, text="📋 Field Selection", padding=12)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0,10), pady=(0, 10))
 
-        ttk.Label(left, text="Enter an Issue Key to load fields:").grid(row=0, column=0, sticky="w")
+        # Field loading section
+        load_frame = ttk.Frame(left)
+        load_frame.grid(row=0, column=0, columnspan=3, sticky="we", pady=(0, 10))
+        
+        ttk.Label(load_frame, text="Issue Key:", font=('Segoe UI', 10)).grid(row=0, column=0, sticky="w")
         self.issue_key_var = tk.StringVar()
-        ttk.Entry(left, textvariable=self.issue_key_var, width=25).grid(row=0, column=1, sticky="we")
-        ttk.Button(left, text="Load Fields", command=self.load_fields).grid(row=0, column=2, sticky="we", padx=(6,0))
+        ttk.Entry(load_frame, textvariable=self.issue_key_var, width=25, font=('Segoe UI', 10)).grid(row=0, column=1, sticky="we", padx=(10, 10))
+        ttk.Button(load_frame, text="🔄 Load Fields", command=self.load_fields).grid(row=0, column=2, sticky="we")
+        load_frame.grid_columnconfigure(1, weight=1)
 
         cols = ("selected", "field", "value")
         self.fields_tree = ttk.Treeview(left, columns=cols, show="headings", height=16)
@@ -217,14 +393,14 @@ class ConfigTab(ttk.Frame):
         self.fields_tree.column("selected", width=40, anchor="center")
         self.fields_tree.column("field", width=260, anchor="w")
         self.fields_tree.column("value", anchor="w")
-        self.fields_tree.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(6,0))
+        self.fields_tree.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(0, 0))
         left.grid_columnconfigure(1, weight=1)
         left.grid_rowconfigure(1, weight=1)
 
         self.fields_tree.bind("<Button-1>", self._on_tree_click)
 
-        right = ttk.LabelFrame(self, text="Metrics", padding=8)
-        right.grid(row=0, column=1, sticky="nsew", pady=8)
+        right = ttk.LabelFrame(main_container, text="⚙️ Configuration", padding=12)
+        right.grid(row=0, column=1, sticky="nsew", pady=(0, 10))
 
         trlf = ttk.LabelFrame(right, text="Custom Status Transition Rules")
         trlf.grid(row=0, column=0, sticky="nsew", pady=(0,8))
@@ -291,20 +467,30 @@ class ConfigTab(ttk.Frame):
         ttk.Label(bh, text="Holidays (YYYY-MM-DD, comma separated):").grid(row=3, column=0, columnspan=4, sticky="w")
         ttk.Entry(bh, textvariable=self.bh_holidays, width=40).grid(row=4, column=0, columnspan=4, sticky="we")
 
-        bottom = ttk.LabelFrame(self, text="Configuration Management", padding=8)
-        bottom.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0,8))
+        bottom = ttk.LabelFrame(main_container, text="💾 Configuration Management", padding=12)
+        bottom.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 0))
 
-        ttk.Label(bottom, text="Config Name:").grid(row=0, column=0, sticky="w")
+        # Config management with better layout
+        config_frame = ttk.Frame(bottom)
+        config_frame.grid(row=0, column=0, sticky="we")
+        
+        ttk.Label(config_frame, text="Configuration Name:", font=('Segoe UI', 10)).grid(row=0, column=0, sticky="w")
         self.cfg_name_var = tk.StringVar()
-        ttk.Entry(bottom, textvariable=self.cfg_name_var, width=30).grid(row=0, column=1, sticky="w")
-        ttk.Button(bottom, text="Save Config", command=self.save_current_config).grid(row=0, column=2, padx=(8,0))
-        ttk.Label(bottom, text="Load:").grid(row=0, column=3, padx=(16,4))
-        self.cfg_combo = ttk.Combobox(bottom, values=list_configs(), state="readonly", width=30)
-        self.cfg_combo.grid(row=0, column=4, sticky="we")
-        ttk.Button(bottom, text="Load", command=self.load_selected_config).grid(row=0, column=5, padx=(6,0))
+        ttk.Entry(config_frame, textvariable=self.cfg_name_var, width=30, font=('Segoe UI', 10)).grid(row=0, column=1, sticky="w", padx=(10, 10))
+        ttk.Button(config_frame, text="💾 Save Config", command=self.save_current_config).grid(row=0, column=2, padx=(0, 20))
+        
+        ttk.Label(config_frame, text="Load Configuration:", font=('Segoe UI', 10)).grid(row=0, column=3, sticky="w")
+        self.cfg_combo = ttk.Combobox(config_frame, values=list_configs(), state="readonly", width=30, font=('Segoe UI', 10))
+        self.cfg_combo.grid(row=0, column=4, sticky="we", padx=(10, 10))
+        ttk.Button(config_frame, text="📂 Load", command=self.load_selected_config).grid(row=0, column=5)
 
+        # Grid configuration for the main container
+        main_container.grid_columnconfigure(0, weight=1)
+        main_container.grid_columnconfigure(1, weight=1)
+        main_container.grid_rowconfigure(0, weight=1)
+        
+        # Grid configuration for the parent frame
         self.grid_columnconfigure(0, weight=1)
-        self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
     def _preview_value(self, v):
@@ -476,25 +662,54 @@ class JQLTab(ttk.Frame):
         self._build_ui()
 
     def _build_ui(self):
-        top = ttk.Frame(self, padding=6)
+        top = ttk.Frame(self, padding=10)
         top.grid(row=0, column=0, sticky="nsew")
-        ttk.Label(top, text="JQL:").grid(row=0, column=0, sticky="w")
+        
+        # Search section
+        search_frame = ttk.LabelFrame(top, text="JQL Search", padding=10)
+        search_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
+        
+        ttk.Label(search_frame, text="JQL Query:", font=('Segoe UI', 10)).grid(row=0, column=0, sticky="w", pady=(0, 5))
         self.jql_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.jql_var, width=80).grid(row=0, column=1, sticky="we")
-        ttk.Button(top, text="Search", command=self.search_jql).grid(row=0, column=2, padx=(6,0))
+        jql_entry = ttk.Entry(search_frame, textvariable=self.jql_var, width=80, font=('Segoe UI', 10))
+        jql_entry.grid(row=1, column=0, sticky="we", pady=(0, 10))
+        
+        # Button and results frame
+        controls_frame = ttk.Frame(search_frame)
+        controls_frame.grid(row=2, column=0, sticky="we")
+        
+        ttk.Button(controls_frame, text="🔍 Search", command=self.search_jql).grid(row=0, column=0, padx=(0, 10))
+        
         self.count_var = tk.StringVar(value="Matches: 0")
-        ttk.Label(top, textvariable=self.count_var).grid(row=0, column=3, padx=(10,0))
-        ttk.Button(top, text="Export CSV", command=self.export_csv).grid(row=0, column=4, padx=(6,0))
-        ttk.Button(top, text="Export JSON", command=self.export_json).grid(row=0, column=5, padx=(6,0))
+        count_label = ttk.Label(controls_frame, textvariable=self.count_var, font=('Segoe UI', 10, 'bold'))
+        count_label.grid(row=0, column=1, padx=(0, 20))
+        
+        # Export section
+        export_frame = ttk.LabelFrame(top, text="Export Options", padding=10)
+        export_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        
+        # Export buttons with icons and better styling
+        export_buttons_frame = ttk.Frame(export_frame)
+        export_buttons_frame.grid(row=0, column=0)
+        
+        ttk.Button(export_buttons_frame, text="📊 Export CSV", command=self.export_csv).grid(row=0, column=0, padx=(0, 10), pady=5)
+        ttk.Button(export_buttons_frame, text="📄 Export JSON", command=self.export_json).grid(row=0, column=1, padx=(0, 10), pady=5)
+        ttk.Button(export_buttons_frame, text="📝 Export Markdown", command=self.export_markdown).grid(row=0, column=2, padx=(0, 10), pady=5)
 
-        top.grid_columnconfigure(1, weight=1)
+        search_frame.grid_columnconfigure(0, weight=1)
+        top.grid_columnconfigure(0, weight=1)
 
-        pb_frame = ttk.Frame(self, padding=(6,0))
-        pb_frame.grid(row=1, column=0, sticky="we")
+        # Progress section
+        pb_frame = ttk.LabelFrame(self, text="Progress", padding=10)
+        pb_frame.grid(row=1, column=0, sticky="we", padx=10, pady=(0, 10))
+        
         self.pb = ttk.Progressbar(pb_frame, orient="horizontal", mode="determinate", value=0)
-        self.pb.grid(row=0, column=0, sticky="we")
-        self.stage_var = tk.StringVar(value="")
-        ttk.Label(pb_frame, textvariable=self.stage_var).grid(row=1, column=0, sticky="w", pady=(2,0))
+        self.pb.grid(row=0, column=0, sticky="we", pady=(0, 5))
+        
+        self.stage_var = tk.StringVar(value="Ready")
+        stage_label = ttk.Label(pb_frame, textvariable=self.stage_var, font=('Segoe UI', 9))
+        stage_label.grid(row=1, column=0, sticky="w")
+        
         pb_frame.grid_columnconfigure(0, weight=1)
 
         self.grid_rowconfigure(2, weight=1)
@@ -557,8 +772,8 @@ class JQLTab(ttk.Frame):
             return True
 
         def on_done(_):
-            self.stage_var.set("")
-            self.log("Export completed.")
+            self.stage_var.set("Ready")
+            self.log("Export completed.", "success")
             messagebox.showinfo("Done", "CSV export completed.")
 
         threading.Thread(target=lambda: self._run_worker(worker, on_done), daemon=True).start()
@@ -591,9 +806,43 @@ class JQLTab(ttk.Frame):
             return True
 
         def on_done(_):
-            self.stage_var.set("")
-            self.log("JSON export completed.")
+            self.stage_var.set("Ready")
+            self.log("JSON export completed.", "success")
             messagebox.showinfo("Done", "JSON export completed.")
+
+        threading.Thread(target=lambda: self._run_worker(worker, on_done), daemon=True).start()
+
+    def export_markdown(self):
+        jql = self.jql_var.get().strip()
+        if not jql:
+            messagebox.showerror("Error", "Enter JQL.")
+            return
+        folder = filedialog.askdirectory(title="Select folder to save Markdown files")
+        if not folder:
+            return
+        self.log("Starting Markdown export...")
+        self.pb["value"] = 0
+        self.pb.update_idletasks()
+
+        def progress_cb(stage, done, total):
+            self.stage_var.set(stage)
+            self.pb["maximum"] = total if total else 1
+            self.pb["value"] = min(done, total) if total else done
+
+        def worker():
+            export_markdown(
+                jira_client=self.client,
+                jql=jql,
+                field_id_to_name=self.field_id_to_name,
+                folder_path=folder,
+                progress_cb=progress_cb
+            )
+            return True
+
+        def on_done(_):
+            self.stage_var.set("Ready")
+            self.log("Markdown export completed.", "success")
+            messagebox.showinfo("Done", "Markdown export completed.")
 
         threading.Thread(target=lambda: self._run_worker(worker, on_done), daemon=True).start()
 
@@ -645,6 +894,159 @@ class JQLTab(ttk.Frame):
             return
         self.after(0, lambda: on_done(res))
 
+class ConnectionManagerWindow(tk.Toplevel):
+    def __init__(self, master, log_fn):
+        super().__init__(master)
+        self.title("Manage Saved Connections")
+        self.geometry("600x400")
+        self.resizable(True, True)
+        self.log = log_fn
+        
+        # Apply modern styling
+        self.configure(bg='#f0f0f0')
+        
+        # Main frame
+        main_frame = ttk.Frame(self, padding=20)
+        main_frame.grid(row=0, column=0, sticky="nsew")
+        
+        # Title
+        title_label = ttk.Label(main_frame, text="Saved Jira Connections", font=('Segoe UI', 14, 'bold'))
+        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
+        
+        # Connection list
+        columns = ("name", "url", "email", "last_used")
+        self.tree = ttk.Treeview(main_frame, columns=columns, show="headings", height=12)
+        
+        self.tree.heading("name", text="Name")
+        self.tree.heading("url", text="Jira URL")
+        self.tree.heading("email", text="Email")
+        self.tree.heading("last_used", text="Last Used")
+        
+        self.tree.column("name", width=150)
+        self.tree.column("url", width=200)
+        self.tree.column("email", width=150)
+        self.tree.column("last_used", width=100)
+        
+        self.tree.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(0, 10))
+        
+        # Scrollbar for the tree
+        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.tree.yview)
+        scrollbar.grid(row=1, column=3, sticky="ns", pady=(0, 10))
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.grid(row=2, column=0, columnspan=3, sticky="we")
+        
+        ttk.Button(btn_frame, text="Delete Selected", command=self.delete_selected).pack(side="left", padx=(0, 10))
+        ttk.Button(btn_frame, text="Test Connection", command=self.test_selected).pack(side="left", padx=(0, 10))
+        ttk.Button(btn_frame, text="Refresh", command=self.refresh_list).pack(side="left", padx=(0, 10))
+        ttk.Button(btn_frame, text="Close", command=self.destroy).pack(side="right")
+        
+        # Configure grid weights
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        main_frame.grid_rowconfigure(1, weight=1)
+        main_frame.grid_columnconfigure(0, weight=1)
+        
+        # Load connections
+        self.refresh_list()
+        
+        # Center the window
+        self.transient(master)
+        self.grab_set()
+        
+    def refresh_list(self):
+        """Refresh the connections list"""
+        # Clear existing items
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+            
+        # Load and display connections
+        connections = load_saved_connections()
+        for name, conn in connections.items():
+            last_used = conn.get("last_used", "Never")
+            if last_used != "Never":
+                try:
+                    dt = datetime.fromisoformat(last_used)
+                    last_used = dt.strftime("%Y-%m-%d")
+                except Exception:
+                    last_used = "Unknown"
+                    
+            self.tree.insert("", "end", values=(
+                name,
+                conn.get("base_url", ""),
+                conn.get("email", ""),
+                last_used
+            ))
+    
+    def delete_selected(self):
+        """Delete the selected connection"""
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select a connection to delete.")
+            return
+            
+        item = selection[0]
+        name = self.tree.item(item)['values'][0]
+        
+        result = messagebox.askyesno(
+            "Confirm Delete", 
+            f"Are you sure you want to delete the connection '{name}'?\n\nThis action cannot be undone.",
+            icon='warning'
+        )
+        
+        if result:
+            connections = load_saved_connections()
+            if name in connections:
+                del connections[name]
+                with open(CONNECTIONS_PATH, "w", encoding="utf-8") as f:
+                    json.dump(connections, f, indent=2)
+                self.log(f"Deleted saved connection '{name}'.")
+                self.refresh_list()
+            else:
+                messagebox.showerror("Error", "Connection not found.")
+    
+    def test_selected(self):
+        """Test the selected connection"""
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select a connection to test.")
+            return
+            
+        item = selection[0]
+        name = self.tree.item(item)['values'][0]
+        
+        connections = load_saved_connections()
+        conn = connections.get(name)
+        if not conn:
+            messagebox.showerror("Error", "Connection not found.")
+            return
+        
+        self.log(f"Testing connection '{name}'...")
+        
+        def test_connection():
+            client = JiraClient(conn["base_url"], conn["email"], conn["api_token"], log_fn=self.log)
+            return client.test_connection()
+            
+        def on_done(ok):
+            if ok:
+                self.log(f"Connection '{name}' test successful.", "success")
+                messagebox.showinfo("Test Successful", f"Connection '{name}' is working correctly.")
+            else:
+                self.log(f"Connection '{name}' test failed.", "err")
+                messagebox.showerror("Test Failed", f"Connection '{name}' failed. Please check credentials.")
+                
+        threading.Thread(target=lambda: self._run_worker(test_connection, on_done), daemon=True).start()
+    
+    def _run_worker(self, worker, on_done):
+        try:
+            result = worker()
+        except Exception as e:
+            self.log(f"Error: {e}")
+            result = False
+        self.after(0, lambda: on_done(result))
+
 class MainWindow(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -653,10 +1055,16 @@ class MainWindow(tk.Tk):
         self.minsize(950, 620)
         ensure_app_dirs()
 
+        # Configure modern theme and styling
+        self._setup_theme()
+
+        # Create menu bar
+        self._create_menu()
+
         self.log_console = LogConsole(self, height=8)
         self.nb = ttk.Notebook(self)
-        self.nb.grid(row=0, column=0, sticky="nsew")
-        self.log_console.grid(row=1, column=0, sticky="nsew")
+        self.nb.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 4))
+        self.log_console.grid(row=1, column=0, sticky="nsew", padx=8, pady=(4, 8))
         self.grid_rowconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=0)
         self.grid_columnconfigure(0, weight=1)
@@ -664,18 +1072,211 @@ class MainWindow(tk.Tk):
         self._client = None
         self._config_tab = None
         self._jql_tab = None
+        self._current_connection_info = None
 
         self.after(100, self.open_login)
 
-    def log(self, msg):
+    def _setup_theme(self):
+        """Configure modern theme and styling"""
+        style = ttk.Style()
+        
+        # Try to use a modern theme - these are available on different platforms
+        available_themes = style.theme_names()
+        
+        # Preferred themes in order of preference
+        preferred_themes = ['vista', 'xpnative', 'winnative', 'clam', 'alt', 'default']
+        
+        selected_theme = 'default'
+        for theme in preferred_themes:
+            if theme in available_themes:
+                selected_theme = theme
+                break
+        
+        style.theme_use(selected_theme)
+        
+        # Configure colors for a modern look
+        bg_color = '#f0f0f0'  # Light gray background
+        fg_color = '#333333'  # Dark gray text
+        accent_color = '#0078d4'  # Microsoft blue accent
+        hover_color = '#106ebe'  # Darker blue for hover
+        
+        # Configure the main window
+        self.configure(bg=bg_color)
+        
+        # Style the notebook (tabs)
+        style.configure('TNotebook', 
+                       background=bg_color,
+                       borderwidth=0)
+        style.configure('TNotebook.Tab',
+                       padding=[12, 8],
+                       focuscolor='none')
+        
+        # Style buttons with modern look
+        style.configure('TButton',
+                       padding=[8, 4],
+                       focuscolor='none')
+        style.map('TButton',
+                 background=[('active', hover_color),
+                           ('pressed', accent_color)])
+        
+        # Style frames
+        style.configure('TFrame', background=bg_color)
+        style.configure('TLabelFrame', background=bg_color)
+        
+        # Style labels
+        style.configure('TLabel', background=bg_color, foreground=fg_color)
+        
+        # Style entry fields
+        style.configure('TEntry', fieldbackground='white', borderwidth=1)
+        
+        # Style treeview
+        style.configure('Treeview',
+                       background='white',
+                       foreground=fg_color,
+                       fieldbackground='white',
+                       borderwidth=1)
+        style.configure('Treeview.Heading',
+                       background=bg_color,
+                       foreground=fg_color,
+                       borderwidth=1)
+        
+        # Style progressbar
+        style.configure('TProgressbar',
+                       background=accent_color,
+                       borderwidth=0,
+                       lightcolor=accent_color,
+                       darkcolor=accent_color)
+
+    def _create_menu(self):
+        """Create the menu bar"""
+        menubar = tk.Menu(self)
+        self.config(menu=menubar)
+        
+        # Connection menu
+        connection_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Connection", menu=connection_menu)
+        connection_menu.add_command(label="Switch Jira Instance...", command=self.switch_jira_instance)
+        connection_menu.add_command(label="Reconnect", command=self.reconnect)
+        connection_menu.add_separator()
+        connection_menu.add_command(label="Manage Saved Connections...", command=self.manage_connections)
+        connection_menu.add_command(label="Connection Info", command=self.show_connection_info)
+        
+        # Help menu
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="About", command=self.show_about)
+
+    def switch_jira_instance(self):
+        """Open login dialog to switch to a different Jira instance"""
+        if self._client is not None:
+            # Ask for confirmation before switching
+            result = messagebox.askyesno(
+                "Switch Jira Instance", 
+                "Are you sure you want to switch to a different Jira instance?\n\n"
+                "This will disconnect from the current instance and any unsaved work may be lost.",
+                icon='question'
+            )
+            if not result:
+                return
+        
+        self.log("Switching Jira instance...")
+        self.open_login()
+
+    def reconnect(self):
+        """Reconnect to the current Jira instance"""
+        if self._current_connection_info is None:
+            messagebox.showwarning("No Connection", "No previous connection to reconnect to.")
+            return
+        
+        self.log("Reconnecting to Jira instance...")
+        
+        # Try to reconnect with saved credentials
+        client = JiraClient(
+            self._current_connection_info['base_url'],
+            self._current_connection_info['email'], 
+            self._current_connection_info['api_token'],
+            log_fn=self.log
+        )
+        
+        def test_and_reconnect():
+            if client.test_connection():
+                self.log("Reconnection successful.", "success")
+                # Update the client reference without recreating tabs
+                self._client = client
+                if self._config_tab:
+                    self._config_tab.client = client
+                if self._jql_tab:
+                    self._jql_tab.client = client
+            else:
+                self.log("Reconnection failed. Please check your connection.", "err")
+                messagebox.showerror("Reconnection Failed", "Could not reconnect to Jira. Please switch instance or check your connection.")
+        
+        threading.Thread(target=test_and_reconnect, daemon=True).start()
+
+    def manage_connections(self):
+        """Open the connection management dialog"""
+        ConnectionManagerWindow(self, log_fn=self.log)
+
+    def show_connection_info(self):
+        """Show information about the current connection"""
+        if self._current_connection_info is None:
+            messagebox.showinfo("Connection Info", "Not connected to any Jira instance.")
+            return
+        
+        info = self._current_connection_info
+        message = f"""Current Jira Connection:
+
+URL: {info['base_url']}
+Email: {info['email']}
+Connected: {'Yes' if self._client else 'No'}"""
+        
+        messagebox.showinfo("Connection Info", message)
+
+    def show_about(self):
+        """Show about dialog"""
+        messagebox.showinfo("About", "Jira Metrics Tool\n\nA tool for analyzing Jira issues and generating metrics.")
+
+    def _clear_tabs(self):
+        """Clear existing tabs when switching instances"""
+        # Remove all tabs except log
+        for tab_id in self.nb.tabs():
+            self.nb.forget(tab_id)
+        
+        # Reset tab references
+        self._config_tab = None
+        self._jql_tab = None
+
+    def log(self, msg, level="info"):
         print(msg)
-        self.log_console.write(msg)
+        self.log_console.write(msg, level)
 
     def open_login(self):
-        LoginWindow(self, on_success=self.on_login, log_fn=self.log)
+        """Open login window for initial connection or switching instances"""
+        switching = self._client is not None
+        
+        # Clear existing tabs if switching instances
+        if switching:
+            self._clear_tabs()
+            self._client = None
+            self._current_connection_info = None
+        
+        LoginWindow(self, on_success=self.on_login, log_fn=self.log, switching_instance=switching)
 
     def on_login(self, client: JiraClient):
+        """Handle successful login"""
         self._client = client
+        
+        # Store connection info for reconnection
+        self._current_connection_info = {
+            'base_url': client.base_url,
+            'email': client.session.auth[0],  # Get email from session auth
+            'api_token': client.session.auth[1]  # Get token from session auth
+        }
+        
+        # Update window title to show connected instance
+        instance_name = client.base_url.replace('https://', '').replace('http://', '')
+        self.title(f"Jira Metrics - Connected to {instance_name}")
+        
         try:
             fields = self._client.get_fields()
         except Exception as e:
@@ -690,13 +1291,16 @@ class MainWindow(tk.Tk):
                 field_id_to_name[fid] = fname
                 field_name_to_id.setdefault(fname, fid)
 
+        # Clear existing tabs before creating new ones
+        self._clear_tabs()
+
         self._config_tab = ConfigTab(self.nb, jira_client=self._client, log_fn=self.log,
                                      field_id_to_name=field_id_to_name, field_name_to_id=field_name_to_id)
         self._jql_tab = JQLTab(self.nb, jira_client=self._client, config_tab=self._config_tab,
                                log_fn=self.log, field_id_to_name=field_id_to_name)
         self.nb.add(self._config_tab, text="Configuration")
         self.nb.add(self._jql_tab, text="JQL Search")
-        self.log("Ready.")
+        self.log(f"Connected to {instance_name} - Ready.")
 
 if __name__ == "__main__":
     MainWindow().mainloop()

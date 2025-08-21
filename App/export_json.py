@@ -25,7 +25,7 @@ def export_json(jira_client, jql, field_id_to_name, folder_path, progress_cb):
                 "self": f"{jira_client.base_url}/rest/api/3/issue/{quote(key)}/comment"
             }
 
-        # Description normalization
+        # Description normalization for JSON metadata
         desc_adf_or_text = fields.get("description")
         desc_md = normalize_description_to_markdown(desc_adf_or_text, options={
             "promote_strong_paragraphs_to_headings": True,
@@ -56,18 +56,52 @@ def export_json(jira_client, jql, field_id_to_name, folder_path, progress_cb):
             }
         }
 
-        # Save JSON file
+        # Save JSON file only
         out_path = f"{folder_path}/{key}.json"
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=2, ensure_ascii=False)
 
-        # Create and save Markdown file
+        progress_cb("Exporting JSON...", idx + 1, total)
+
+def export_markdown(jira_client, jql, field_id_to_name, folder_path, progress_cb):
+    keys, _ = jira_client.search_jql(jql, max_results=100, fields=["key"], expand_changelog=False)
+    total = len(keys)
+    progress_cb("Exporting Markdown...", 0, total)
+
+    for idx, key in enumerate(keys):
+        issue = jira_client.get_issue(key, expand_changelog=True)
+
+        fields = issue.get("fields", {}) or {}
+        comments_block = fields.get("comment")
+        total_comments = (comments_block or {}).get("total")
+        if comments_block is None or total_comments is None or total_comments > len((comments_block or {}).get("comments", [])):
+            full_comments = jira_client.get_all_comments(key)
+            fields["comment"] = {
+                "comments": full_comments,
+                "total": len(full_comments),
+                "maxResults": len(full_comments),
+                "startAt": 0,
+                "self": f"{jira_client.base_url}/rest/api/3/issue/{quote(key)}/comment"
+            }
+
+        # Description normalization
+        desc_adf_or_text = fields.get("description")
+        desc_md = normalize_description_to_markdown(desc_adf_or_text, options={
+            "promote_strong_paragraphs_to_headings": True,
+            "heading_level": 2,
+            "emoji_style": "unicode",
+            "list_indent_spaces": 2,
+            "escape_strategy": "minimal",
+            "ensure_trailing_newline": True
+        })
+
+        # Create and save Markdown file only
         markdown_content = create_markdown_content(issue, fields, field_id_to_name, desc_md)
         md_path = f"{folder_path}/{key}.md"
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(markdown_content)
 
-        progress_cb("Exporting JSON...", idx + 1, total)
+        progress_cb("Exporting Markdown...", idx + 1, total)
 
 def create_markdown_content(issue, fields, field_id_to_name, description_md):
     """Create markdown content for an issue"""
