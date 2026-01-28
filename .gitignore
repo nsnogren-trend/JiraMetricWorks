@@ -31,3 +31,8 @@ Thumbs.db
 credentials.json
 connections.json
 configs/
+
+# User-generated config files
+App/saved_jql_queries.json
+App/timeline_last_config.json
+App/saved_timeline_configs/
