@@ -11,6 +11,10 @@ import re
 from jira_client import JiraClient
 from export_csv import export_csv
 from export_json import export_json, export_markdown
+from sprint_analysis import analyze_sprint_patterns, analyze_sprint_patterns_by_sprint
+from timeline_report_ui import TimelineReportTab
+from jql_selector_widget import JQLSelectorWidget
+from jql_manager import JQLManager
 
 APP_DIR = os.path.join(os.path.expanduser("~"), ".jira_metrics")
 CREDS_PATH = os.path.join(APP_DIR, "credentials.json")
@@ -659,6 +663,7 @@ class JQLTab(ttk.Frame):
         self.config_tab = config_tab
         self.log = log_fn
         self.field_id_to_name = field_id_to_name
+        self.jql_manager = JQLManager()  # Initialize JQL manager
         self._build_ui()
 
     def _build_ui(self):
@@ -669,14 +674,13 @@ class JQLTab(ttk.Frame):
         search_frame = ttk.LabelFrame(top, text="JQL Search", padding=10)
         search_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
         
-        ttk.Label(search_frame, text="JQL Query:", font=('Segoe UI', 10)).grid(row=0, column=0, sticky="w", pady=(0, 5))
-        self.jql_var = tk.StringVar()
-        jql_entry = ttk.Entry(search_frame, textvariable=self.jql_var, width=80, font=('Segoe UI', 10))
-        jql_entry.grid(row=1, column=0, sticky="we", pady=(0, 10))
+        # Use the JQL selector widget
+        self.jql_selector = JQLSelectorWidget(search_frame, self.jql_manager)
+        self.jql_selector.grid(row=0, column=0, sticky="we", pady=(0, 10))
         
         # Button and results frame
         controls_frame = ttk.Frame(search_frame)
-        controls_frame.grid(row=2, column=0, sticky="we")
+        controls_frame.grid(row=1, column=0, sticky="we")
         
         ttk.Button(controls_frame, text="🔍 Search", command=self.search_jql).grid(row=0, column=0, padx=(0, 10))
         
@@ -716,7 +720,7 @@ class JQLTab(ttk.Frame):
         self.grid_columnconfigure(0, weight=1)
 
     def search_jql(self):
-        jql = self.jql_var.get().strip()
+        jql = self.jql_selector.get().strip()
         if not jql:
             messagebox.showerror("Error", "Enter JQL.")
             return
@@ -732,7 +736,7 @@ class JQLTab(ttk.Frame):
         threading.Thread(target=lambda: self._run_worker(worker, on_done), daemon=True).start()
 
     def export_csv(self):
-        jql = self.jql_var.get().strip()
+        jql = self.jql_selector.get().strip()
         if not jql:
             messagebox.showerror("Error", "Enter JQL.")
             return
@@ -779,7 +783,7 @@ class JQLTab(ttk.Frame):
         threading.Thread(target=lambda: self._run_worker(worker, on_done), daemon=True).start()
 
     def export_json(self):
-        jql = self.jql_var.get().strip()
+        jql = self.jql_selector.get().strip()
         if not jql:
             messagebox.showerror("Error", "Enter JQL.")
             return
@@ -813,7 +817,7 @@ class JQLTab(ttk.Frame):
         threading.Thread(target=lambda: self._run_worker(worker, on_done), daemon=True).start()
 
     def export_markdown(self):
-        jql = self.jql_var.get().strip()
+        jql = self.jql_selector.get().strip()
         if not jql:
             messagebox.showerror("Error", "Enter JQL.")
             return
@@ -1046,6 +1050,307 @@ class ConnectionManagerWindow(tk.Toplevel):
             self.log(f"Error: {e}")
             result = False
         self.after(0, lambda: on_done(result))
+
+
+class SprintAnalysisTab(ttk.Frame):
+    def __init__(self, master, jira_client: JiraClient, log_fn, field_id_to_name):
+        super().__init__(master)
+        self.client = jira_client
+        self.log = log_fn
+        self.field_id_to_name = field_id_to_name
+        self.boards = []
+        self.sprints = []
+        self.selected_board = None
+        self.selected_sprint = None
+        self._build_ui()
+        self._load_boards()
+
+    def _build_ui(self):
+        top = ttk.Frame(self, padding=10)
+        top.grid(row=0, column=0, sticky="nsew")
+        
+        # Board selection section
+        board_frame = ttk.LabelFrame(top, text="Board Selection", padding=10)
+        board_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
+        
+        ttk.Label(board_frame, text="Select Board:", font=('Segoe UI', 10)).grid(row=0, column=0, sticky="w", pady=(0, 5))
+        
+        self.board_var = tk.StringVar()
+        self.board_combo = ttk.Combobox(board_frame, textvariable=self.board_var, width=60, state="readonly")
+        self.board_combo.grid(row=1, column=0, sticky="we", pady=(0, 10))
+        self.board_combo.bind("<<ComboboxSelected>>", self._on_board_selected)
+        
+        ttk.Button(board_frame, text="🔄 Refresh Boards", command=self._load_boards).grid(row=1, column=1, padx=(10, 0))
+        
+        # Sprint selection section
+        sprint_frame = ttk.LabelFrame(top, text="Sprint Selection", padding=10)
+        sprint_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        
+        ttk.Label(sprint_frame, text="Select Sprint:", font=('Segoe UI', 10)).grid(row=0, column=0, sticky="w", pady=(0, 5))
+        
+        self.sprint_var = tk.StringVar()
+        self.sprint_combo = ttk.Combobox(sprint_frame, textvariable=self.sprint_var, width=60, state="readonly")
+        self.sprint_combo.grid(row=1, column=0, sticky="we", pady=(0, 10))
+        self.sprint_combo.bind("<<ComboboxSelected>>", self._on_sprint_selected)
+        
+        # Sprint info display
+        self.sprint_info_var = tk.StringVar(value="No sprint selected")
+        sprint_info_label = ttk.Label(sprint_frame, textvariable=self.sprint_info_var, font=('Segoe UI', 9))
+        sprint_info_label.grid(row=2, column=0, sticky="w", pady=(5, 0))
+        
+        # Analysis section
+        analysis_frame = ttk.LabelFrame(top, text="Sprint Analysis", padding=10)
+        analysis_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
+        
+        self.analyze_button = ttk.Button(analysis_frame, text="🏃 Analyze Sprint Patterns", 
+                                       command=self.analyze_sprint, state="disabled")
+        self.analyze_button.grid(row=0, column=0, pady=5)
+        
+        ttk.Button(analysis_frame, text="💾 Export to CSV", 
+                  command=self.export_csv, state="normal").grid(row=0, column=1, padx=(10, 0), pady=5)
+        
+        # Results preview section
+        results_frame = ttk.LabelFrame(top, text="Analysis Results Preview", padding=10)
+        results_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
+        
+        # Create treeview for results preview
+        columns = ("Issue", "From Status", "To Status", "Date", "Sprint Day", "Progress %")
+        self.tree = ttk.Treeview(results_frame, columns=columns, show="headings", height=6)
+        
+        for col in columns:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=100)
+        
+        scrollbar = ttk.Scrollbar(results_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        
+        # Progress section
+        pb_frame = ttk.LabelFrame(self, text="Progress", padding=10)
+        pb_frame.grid(row=1, column=0, sticky="we", padx=10, pady=(0, 10))
+        
+        self.pb = ttk.Progressbar(pb_frame, orient="horizontal", mode="determinate", value=0)
+        self.pb.grid(row=0, column=0, sticky="we", pady=(0, 5))
+        
+        self.stage_var = tk.StringVar(value="Ready")
+        stage_label = ttk.Label(pb_frame, textvariable=self.stage_var, font=('Segoe UI', 9))
+        stage_label.grid(row=1, column=0, sticky="w")
+        
+        # Configure grid weights
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        top.grid_rowconfigure(3, weight=1)
+        top.grid_columnconfigure(0, weight=1)
+        board_frame.grid_columnconfigure(0, weight=1)
+        sprint_frame.grid_columnconfigure(0, weight=1)
+        results_frame.grid_rowconfigure(0, weight=1)
+        results_frame.grid_columnconfigure(0, weight=1)
+        pb_frame.grid_columnconfigure(0, weight=1)
+        
+        # Store analysis results
+        self.last_results = []
+        self.last_headers = []
+
+    def _load_boards(self):
+        """Load available boards"""
+        def worker():
+            try:
+                self.boards = self.client.get_all_boards()
+                return True
+            except Exception as e:
+                self.log(f"Error loading boards: {e}")
+                return False
+        
+        def on_done(success):
+            self.stage_var.set("Ready")
+            if success:
+                board_names = [f"{board['name']} (ID: {board['id']})" for board in self.boards]
+                self.board_combo['values'] = board_names
+                self.log(f"Loaded {len(self.boards)} boards.")
+            else:
+                self.log("Failed to load boards.", "error")
+        
+        self.stage_var.set("Loading boards...")
+        threading.Thread(target=lambda: self._run_worker(worker, on_done), daemon=True).start()
+
+    def _on_board_selected(self, event=None):
+        """Handle board selection"""
+        selection = self.board_var.get()
+        if not selection:
+            return
+        
+        # Extract board ID from selection
+        try:
+            board_id = int(selection.split("(ID: ")[1].split(")")[0])
+            self.selected_board = next(board for board in self.boards if board['id'] == board_id)
+            self._load_sprints(board_id)
+        except (ValueError, IndexError, StopIteration):
+            self.log("Error parsing board selection", "error")
+
+    def _load_sprints(self, board_id):
+        """Load sprints for the selected board"""
+        def worker():
+            try:
+                self.sprints = self.client.get_board_sprints(board_id)
+                return True
+            except Exception as e:
+                self.log(f"Error loading sprints: {e}")
+                return False
+        
+        def on_done(success):
+            self.stage_var.set("Ready")
+            if success:
+                # Sort sprints by state (active first, then closed, then future) and name
+                sprint_order = {'active': 0, 'closed': 1, 'future': 2}
+                self.sprints.sort(key=lambda s: (sprint_order.get(s.get('state', 'future'), 3), s.get('name', '')))
+                
+                sprint_names = []
+                for sprint in self.sprints:
+                    state_emoji = {'active': '🔄', 'closed': '✅', 'future': '📅'}.get(sprint.get('state'), '❓')
+                    sprint_names.append(f"{state_emoji} {sprint['name']} (ID: {sprint['id']})")
+                
+                self.sprint_combo['values'] = sprint_names
+                self.sprint_var.set("")  # Clear selection
+                self.sprint_info_var.set("No sprint selected")
+                self.analyze_button.config(state="disabled")
+                self.log(f"Loaded {len(self.sprints)} sprints.")
+            else:
+                self.log("Failed to load sprints.", "error")
+        
+        self.stage_var.set("Loading sprints...")
+        threading.Thread(target=lambda: self._run_worker(worker, on_done), daemon=True).start()
+
+    def _on_sprint_selected(self, event=None):
+        """Handle sprint selection"""
+        selection = self.sprint_var.get()
+        if not selection:
+            return
+        
+        # Extract sprint ID from selection
+        try:
+            sprint_id = int(selection.split("(ID: ")[1].split(")")[0])
+            self.selected_sprint = next(sprint for sprint in self.sprints if sprint['id'] == sprint_id)
+            
+            # Update sprint info display
+            sprint = self.selected_sprint
+            info_parts = [f"State: {sprint.get('state', 'Unknown')}"]
+            
+            if sprint.get('startDate'):
+                start_date = dtparser.parse(sprint['startDate']).strftime('%Y-%m-%d')
+                info_parts.append(f"Start: {start_date}")
+            
+            if sprint.get('endDate'):
+                end_date = dtparser.parse(sprint['endDate']).strftime('%Y-%m-%d')
+                info_parts.append(f"End: {end_date}")
+            
+            if sprint.get('goal'):
+                info_parts.append(f"Goal: {sprint['goal']}")
+            
+            self.sprint_info_var.set(" | ".join(info_parts))
+            self.analyze_button.config(state="normal")
+            
+        except (ValueError, IndexError, StopIteration):
+            self.log("Error parsing sprint selection", "error")
+
+    def analyze_sprint(self):
+        """Analyze the selected sprint"""
+        if not self.selected_sprint:
+            messagebox.showerror("Error", "Please select a sprint first.")
+            return
+        
+        # Clear previous results
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        
+        self.log("Starting sprint analysis...")
+        self.pb["value"] = 0
+        self.pb.update_idletasks()
+
+        def progress_cb(stage, done, total):
+            self.stage_var.set(stage)
+            self.pb["maximum"] = total if total else 1
+            self.pb["value"] = min(done, total) if total else done
+
+        def worker():
+            try:
+                headers, row_iter = analyze_sprint_patterns_by_sprint(
+                    jira_client=self.client,
+                    sprint_id=self.selected_sprint['id'],
+                    progress_cb=progress_cb
+                )
+                
+                results = list(row_iter())
+                self.last_headers = headers
+                self.last_results = results
+                
+                return True
+            except Exception as e:
+                messagebox.showerror("Error", f"Sprint analysis failed: {e}")
+                return False
+
+        def on_done(success):
+            self.stage_var.set("Ready")
+            if success:
+                self._display_results()
+                self.log("Sprint analysis completed.", "success")
+            else:
+                self.log("Sprint analysis failed.", "error")
+
+        threading.Thread(target=lambda: self._run_worker(worker, on_done), daemon=True).start()
+
+    def _display_results(self):
+        """Display analysis results in the preview tree"""
+        for result in self.last_results[:20]:  # Show first 20 results
+            values = (
+                result.get('issue_key', ''),
+                result.get('from_status', ''),
+                result.get('to_status', ''),
+                result.get('transition_date', '')[:10] if result.get('transition_date') else '',  # Just date part
+                result.get('sprint_day', ''),
+                f"{result.get('sprint_progress_percent', 0):.1f}%"
+            )
+            self.tree.insert("", "end", values=values)
+        
+        if len(self.last_results) > 20:
+            self.tree.insert("", "end", values=("...", f"({len(self.last_results) - 20} more transitions)", "", "", "", ""))
+
+    def export_csv(self):
+        """Export analysis results to CSV"""
+        if not self.last_results:
+            messagebox.showwarning("Warning", "No analysis results to export. Run analysis first.")
+            return
+        
+        filepath = filedialog.asksaveasfilename(
+            title="Save Sprint Analysis CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")]
+        )
+        
+        if filepath:
+            try:
+                import csv
+                with open(filepath, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=self.last_headers)
+                    writer.writeheader()
+                    writer.writerows(self.last_results)
+                
+                self.log(f"Results exported to {filepath}", "success")
+                messagebox.showinfo("Success", f"Results exported to {filepath}")
+            except Exception as e:
+                self.log(f"Export failed: {e}", "error")
+                messagebox.showerror("Error", f"Export failed: {e}")
+
+    def _run_worker(self, worker, on_done):
+        """Run a worker function in a thread and call on_done with the result"""
+        try:
+            result = worker()
+        except Exception as e:
+            self.log(f"Error: {e}")
+            result = False
+        self.after(0, lambda: on_done(result))
+
 
 class MainWindow(tk.Tk):
     def __init__(self):
@@ -1298,8 +1603,14 @@ Connected: {'Yes' if self._client else 'No'}"""
                                      field_id_to_name=field_id_to_name, field_name_to_id=field_name_to_id)
         self._jql_tab = JQLTab(self.nb, jira_client=self._client, config_tab=self._config_tab,
                                log_fn=self.log, field_id_to_name=field_id_to_name)
+        self._sprint_tab = SprintAnalysisTab(self.nb, jira_client=self._client, 
+                                           log_fn=self.log, field_id_to_name=field_id_to_name)
+        self._timeline_tab = TimelineReportTab(self.nb, jira_client=self._client, 
+                                             log_fn=self.log, field_id_to_name=field_id_to_name)
         self.nb.add(self._config_tab, text="Configuration")
         self.nb.add(self._jql_tab, text="JQL Search")
+        self.nb.add(self._sprint_tab, text="Sprint Analysis")
+        self.nb.add(self._timeline_tab, text="Timeline Report")
         self.log(f"Connected to {instance_name} - Ready.")
 
 if __name__ == "__main__":
