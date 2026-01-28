@@ -64,7 +64,7 @@ Use this tab to set up which fields and metrics to include in CSV exports.
    - A list of all fields on that issue appears with example values
 
 2. **Select Fields to Export:**
-   - Click the checkbox (✔ column) next to each field you want included in exports
+   - Click the checkbox (✔ column) next to each field you want included in csv exports
 
 3. **Add Custom Status Transition Rules** (optional):
    - Click **Add Rule** to track time between specific status transitions
